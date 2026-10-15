@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: deribit
+      POSTGRES_USER: deribit
+      POSTGRES_PASSWORD: deribit
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deribit -d deribit"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  migrate:
+    build: .
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+  worker:
+    build: .
+    command: ["uv", "run", "--no-sync", "celery", "-A", "deribit_price_api.workers.celery_app.celery_app", "worker", "--loglevel=INFO"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?CELERY_BROKER_URL is required}
+      DERIBIT_API_URL: ${DERIBIT_API_URL:?DERIBIT_API_URL is required}
+    healthcheck:
+      test: ["CMD-SHELL", "uv run --no-sync celery -A deribit_price_api.workers.celery_app.celery_app inspect ping --timeout=5 | grep -q pong"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+  beat:
+    build: .
+    command: ["uv", "run", "--no-sync", "celery", "-A", "deribit_price_api.workers.celery_app.celery_app", "beat", "--loglevel=INFO"]
+    environment:
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?CELERY_BROKER_URL is required}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+  flower:
+    build: .
+    command: ["uv", "run", "--no-sync", "celery", "-A", "deribit_price_api.workers.celery_app.celery_app", "flower", "--port=5555"]
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?CELERY_BROKER_URL is required}
+    depends_on:
+      redis:
+        condition: service_started
+      worker:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    driver: local
